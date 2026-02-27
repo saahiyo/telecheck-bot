@@ -6,7 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/bot.js",
-    "dev": "node --watch src/bot.js"
+    "dev": "node --watch src/bot.js",
+    "test": "node --test"
   },
   "dependencies": {
     "axios": "^1.11.0",
