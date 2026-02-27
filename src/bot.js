@@ -223,7 +223,7 @@ bot.start(async (ctx) => {
       "<b>TeleCheck Bot</b>",
       "",
       "Commands:",
-      "/check <link> - check one link",
+      "/check &lt;link&gt; - check one link",
       "/bulk - request bulk mode prompt",
       "/stats - show API stats",
       "/health - runtime health",
