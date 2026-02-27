@@ -6,6 +6,7 @@ const { Telegraf } = require("telegraf");
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const API_BASE_URL = process.env.API_BASE_URL || "https://telecheck.vercel.app";
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 20000);
+const BULK_REPLY_PROMPT = "Reply to this message with all links to validate (space/newline separated).";
 
 if (!BOT_TOKEN) {
   throw new Error("Missing BOT_TOKEN in environment.");
@@ -17,6 +18,7 @@ const api = axios.create({
 });
 
 const bot = new Telegraf(BOT_TOKEN);
+const URL_REGEX = /(https?:\/\/[^\s,]+|t\.me\/[^\s,]+)/g;
 
 function escapeHtml(text) {
   return String(text)
@@ -55,20 +57,91 @@ function formatOne(result) {
   const icon = result.status === "valid" ? "[VALID]" : result.status === "invalid" ? "[INVALID]" : "[UNKNOWN]";
   let out = `${icon} <b>${escapeHtml(result.status.toUpperCase())}</b>\n`;
   out += `LINK: <code>${escapeHtml(result.link)}</code>`;
-  if (result.reason) out += `\n?? ${escapeHtml(result.reason)}`;
   return out;
 }
 
-function splitLinks(text) {
-  return String(text)
-    .split(/\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+function extractUrls(text) {
+  return (String(text).match(URL_REGEX) || []).map((l) => l.trim());
+}
+
+function deduplicateLinks(links) {
+  const seen = new Set();
+  const unique = [];
+  for (const link of links) {
+    if (seen.has(link)) continue;
+    seen.add(link);
+    unique.push(link);
+  }
+  return unique;
+}
+
+async function replyInChunks(ctx, lines, maxLen = 3500) {
+  const chunks = [];
+  let current = "";
+  for (const line of lines) {
+    const next = current ? `${current}\n${line}` : line;
+    if (next.length > maxLen && current) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = next;
+    }
+  }
+  if (current) chunks.push(current);
+
+  for (const chunk of chunks) {
+    await ctx.reply(chunk);
+  }
 }
 
 async function checkSingle(link) {
   const { data } = await api.get("/", { params: { link } });
-  return normalizeResult(data);
+  return normalizeResult({ ...(data || {}), link });
+}
+
+function extractBulkRows(data, requestedLinks) {
+  if (Array.isArray(data)) return data;
+
+  if (Array.isArray(data?.results)) return data.results;
+  if (Array.isArray(data?.data)) return data.data;
+  if (Array.isArray(data?.items)) return data.items;
+
+  const validList = Array.isArray(data?.valid) ? data.valid : null;
+  const invalidList = Array.isArray(data?.invalid) ? data.invalid : null;
+  const unknownList = Array.isArray(data?.unknown) ? data.unknown : null;
+  if (validList || invalidList || unknownList) {
+    const rows = [];
+    for (const link of validList || []) rows.push({ link, status: "valid" });
+    for (const link of invalidList || []) rows.push({ link, status: "invalid" });
+    for (const link of unknownList || []) rows.push({ link, status: "unknown" });
+    if (rows.length > 0) return rows;
+  }
+
+  if (data && typeof data === "object") {
+    const keys = Object.keys(data);
+    const mapLike = keys.length > 0 && keys.every((k) => typeof data[k] !== "function");
+    if (mapLike) {
+      const byLinkRows = [];
+      for (const key of keys) {
+        const value = data[key];
+        if (requestedLinks.includes(key)) {
+          if (typeof value === "string") byLinkRows.push({ link: key, status: value });
+          else if (value && typeof value === "object") byLinkRows.push({ link: key, ...value });
+        }
+      }
+      if (byLinkRows.length > 0) return byLinkRows;
+    }
+  }
+
+  return null;
+}
+
+async function checkBulkFallback(links) {
+  const settled = await Promise.allSettled(links.map((link) => checkSingle(link)));
+  return settled.map((entry, idx) => {
+    if (entry.status === "fulfilled") return entry.value;
+    return normalizeResult({ link: links[idx], status: "unknown", reason: entry.reason?.message || "Check failed" });
+  });
 }
 
 async function checkBulk(links) {
@@ -82,27 +155,28 @@ async function checkBulk(links) {
   for (const attempt of attempts) {
     try {
       const { data } = await attempt();
-      const rows = Array.isArray(data)
-        ? data
-        : Array.isArray(data?.results)
-        ? data.results
-        : Array.isArray(data?.data)
-        ? data.data
-        : Array.isArray(data?.items)
-        ? data.items
-        : null;
+      const rows = extractBulkRows(data, links);
 
       if (!rows) {
-        return links.map((link) => normalizeResult({ link, status: "unknown", reason: "Unexpected bulk response format" }));
+        continue;
       }
 
-      return rows.map(normalizeResult);
+      const normalized = rows.map(normalizeResult);
+      if (normalized.length === links.length) return normalized;
+      if (normalized.length > 0) {
+        const byLink = new Map(normalized.map((r) => [r.link, r]));
+        return links.map((link) => byLink.get(link) || normalizeResult({ link, status: "unknown", reason: "Missing in bulk response" }));
+      }
     } catch (err) {
       lastError = err;
     }
   }
 
-  throw lastError;
+  if (lastError) {
+    // If bulk endpoint is unstable, fallback to reliable single checks.
+    return checkBulkFallback(links);
+  }
+  return checkBulkFallback(links);
 }
 
 async function getStats() {
@@ -163,7 +237,8 @@ bot.command("stats", async (ctx) => {
 
 bot.command("check", async (ctx) => {
   const text = ctx.message.text || "";
-  const link = text.replace(/^\/check(@\w+)?\s*/i, "").trim();
+  const input = text.replace(/^\/check(@\w+)?\s*/i, "").trim();
+  const link = extractUrls(input)[0] || input;
 
   if (!link) {
     await ctx.reply("Provide a link. Example: /check https://t.me/example");
@@ -179,16 +254,22 @@ bot.command("check", async (ctx) => {
 });
 
 bot.command("bulk", async (ctx) => {
-  await ctx.reply("Send links in your next message (space/newline separated). I will validate all of them.");
+  await ctx.reply(BULK_REPLY_PROMPT);
 });
 
 bot.on("text", async (ctx) => {
   const text = (ctx.message.text || "").trim();
+  const reply = ctx.message.reply_to_message;
+  const isBulkReply =
+    Boolean(reply?.from?.is_bot) &&
+    typeof reply?.text === "string" &&
+    reply.text.includes(BULK_REPLY_PROMPT);
 
   if (!text || text.startsWith("/")) return;
 
-  const links = splitLinks(text);
+  const links = deduplicateLinks(extractUrls(text));
   if (links.length === 0) return;
+  if (links.length > 1 && !isBulkReply) return;
 
   if (links.length === 1) {
     try {
@@ -209,6 +290,10 @@ bot.on("text", async (ctx) => {
       invalid: results.filter((r) => r.status === "invalid").length,
       unknown: results.filter((r) => r.status === "unknown").length,
     };
+    const statusRank = { valid: 0, invalid: 1, unknown: 2 };
+    const orderedResults = [...results].sort(
+      (a, b) => (statusRank[a.status] ?? 99) - (statusRank[b.status] ?? 99)
+    );
 
     const lines = [
       `Done. Total: ${results.length}`,
@@ -216,17 +301,12 @@ bot.on("text", async (ctx) => {
       `Invalid: ${summary.invalid}`,
       `Unknown: ${summary.unknown}`,
       "",
-      ...results.slice(0, 30).map((r) => {
+      ...orderedResults.map((r) => {
         const icon = r.status === "valid" ? "[V]" : r.status === "invalid" ? "[X]" : "[?]";
-        return `${icon} ${r.link}${r.reason ? ` (${r.reason})` : ""}`;
+        return `${icon} ${r.link}`;
       }),
     ];
-
-    if (results.length > 30) {
-      lines.push("", `Showing first 30 of ${results.length} results.`);
-    }
-
-    await ctx.reply(lines.join("\n"));
+    await replyInChunks(ctx, lines);
   } catch (err) {
     await ctx.reply(`Bulk check failed: ${err.message}`);
   }
