@@ -3,7 +3,7 @@ require("dotenv").config();
 const { promises: fsp } = require("fs");
 const path = require("path");
 const axios = require("axios");
-const { Telegraf } = require("telegraf");
+const { Telegraf, Markup } = require("telegraf");
 const {
   pick,
   normalizeResult,
@@ -28,6 +28,7 @@ const RATE_LIMIT_COUNT = Number(process.env.RATE_LIMIT_COUNT || 20);
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60000);
 const AUTH_PASSWORD = String(process.env.AUTH_PASSWORD || "").trim();
 const AUTH_STORE_FILE = process.env.AUTH_STORE_FILE || "./data/auth-users.json";
+const USER_PREFS_STORE_FILE = process.env.USER_PREFS_STORE_FILE || "./data/user-settings.json";
 const ALLOWED_CHAT_IDS = parseIdList(process.env.ALLOWED_CHAT_IDS || "");
 const ADMIN_USER_IDS = parseIdList(process.env.ADMIN_USER_IDS || "");
 
@@ -47,6 +48,8 @@ const api = axios.create({
 const rateLimiter = new Map();
 const authenticatedUsers = new Set();
 const authStorePath = path.isAbsolute(AUTH_STORE_FILE) ? AUTH_STORE_FILE : path.resolve(process.cwd(), AUTH_STORE_FILE);
+const userPrefs = new Map();
+const userPrefsStorePath = path.isAbsolute(USER_PREFS_STORE_FILE) ? USER_PREFS_STORE_FILE : path.resolve(process.cwd(), USER_PREFS_STORE_FILE);
 
 function parseIdList(value) {
   return new Set(
@@ -73,6 +76,34 @@ function isAuthExemptMessage(text) {
   return /^\/(start|help|auth)(@\w+)?(\s|$)/i.test(String(text || ""));
 }
 
+function getUserPref(userId) {
+  const id = Number(userId);
+  const saved = Number.isFinite(id) ? userPrefs.get(id) : null;
+  return {
+    showInvalidBulk: saved?.showInvalidBulk !== false,
+  };
+}
+
+function shouldShowInvalidBulkForCtx(ctx) {
+  const userId = Number(ctx?.from?.id);
+  return getUserPref(userId).showInvalidBulk;
+}
+
+function mainKeyboard(ctx) {
+  const rows = [];
+  if (hasPasswordAuth() && !isAuthenticated(ctx)) {
+    rows.push(["/auth"]);
+    rows.push(["/help"]);
+    return Markup.keyboard(rows).resize();
+  }
+
+  rows.push(["/check", "/bulk"]);
+  rows.push(["/stats", "/invalid"]);
+  rows.push(["/help"]);
+  if (isAdmin(ctx)) rows.push(["/health"]);
+  return Markup.keyboard(rows).resize();
+}
+
 async function loadAuthenticatedUsers() {
   try {
     const raw = await fsp.readFile(authStorePath, "utf8");
@@ -91,11 +122,47 @@ async function loadAuthenticatedUsers() {
   }
 }
 
+async function loadUserPrefs() {
+  try {
+    const raw = await fsp.readFile(userPrefsStorePath, "utf8");
+    const parsed = JSON.parse(raw);
+    const entries = parsed && typeof parsed === "object" ? parsed.users : null;
+    if (!entries || typeof entries !== "object") {
+      log("info", "user_prefs_store_loaded", { file: userPrefsStorePath, users: 0 });
+      return;
+    }
+    for (const [k, v] of Object.entries(entries)) {
+      const id = Number(k);
+      if (!Number.isFinite(id)) continue;
+      const showInvalidBulk = v?.showInvalidBulk !== false;
+      userPrefs.set(id, { showInvalidBulk });
+    }
+    log("info", "user_prefs_store_loaded", { file: userPrefsStorePath, users: userPrefs.size });
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      log("info", "user_prefs_store_not_found", { file: userPrefsStorePath });
+      return;
+    }
+    log("error", "user_prefs_store_load_failed", { file: userPrefsStorePath, message: err.message });
+  }
+}
+
 async function persistAuthenticatedUsers() {
   const dir = path.dirname(authStorePath);
   await fsp.mkdir(dir, { recursive: true });
   const payload = { user_ids: [...authenticatedUsers].sort((a, b) => a - b) };
   await fsp.writeFile(authStorePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+async function persistUserPrefs() {
+  const dir = path.dirname(userPrefsStorePath);
+  await fsp.mkdir(dir, { recursive: true });
+  const users = {};
+  for (const [userId, pref] of userPrefs.entries()) {
+    users[String(userId)] = { showInvalidBulk: pref?.showInvalidBulk !== false };
+  }
+  const payload = { users };
+  await fsp.writeFile(userPrefsStorePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
 async function authenticateUser(userId) {
@@ -104,6 +171,13 @@ async function authenticateUser(userId) {
   authenticatedUsers.add(userId);
   await persistAuthenticatedUsers();
   return true;
+}
+
+async function setShowInvalidBulk(userId, showInvalidBulk) {
+  const id = Number(userId);
+  if (!Number.isFinite(id)) return;
+  userPrefs.set(id, { showInvalidBulk: Boolean(showInvalidBulk) });
+  await persistUserPrefs();
 }
 
 function nowIso() {
@@ -270,7 +344,7 @@ async function guard(ctx) {
   }
   const text = String(ctx?.message?.text || "");
   if (!isAuthenticated(ctx) && !isAuthExemptMessage(text)) {
-    await ctx.reply("Password required. Use /auth <password>.");
+    await ctx.reply("Password required. Use /auth <password>.", mainKeyboard(ctx));
     return false;
   }
   if (!consumeRateLimit(ctx)) {
@@ -294,10 +368,12 @@ bot.start(async (ctx) => {
       "/check &lt;link&gt; - check one link",
       "/bulk - request bulk mode prompt",
       "/auth &lt;password&gt; - authenticate this account",
+      "/invalid &lt;on|off&gt; - show/hide invalid links in bulk output",
       "/stats - show API stats",
       "/health - runtime health",
       "/help - usage guide",
-    ].join("\n")
+    ].join("\n"),
+    mainKeyboard(ctx)
   );
 });
 
@@ -310,8 +386,10 @@ bot.help(async (ctx) => {
       "1) /check https://t.me/example",
       "2) /bulk then reply to prompt with many links",
       "3) /stats",
+      "4) /invalid on|off (bulk output preference)",
       `Limits: ${MAX_LINKS_PER_BULK} links per bulk request.`,
-    ].join("\n")
+    ].join("\n"),
+    mainKeyboard(ctx)
   );
 });
 
@@ -321,18 +399,18 @@ bot.command("auth", async (ctx) => {
     return;
   }
   if (!hasPasswordAuth()) {
-    await ctx.reply("Password auth is not enabled.");
+    await ctx.reply("Password auth is not enabled.", mainKeyboard(ctx));
     return;
   }
 
   const text = String(ctx?.message?.text || "");
   const supplied = text.replace(/^\/auth(@\w+)?\s*/i, "").trim();
   if (!supplied) {
-    await ctx.reply("Provide password. Example: /auth your_password");
+    await ctx.reply("Provide password. Example: /auth your_password", mainKeyboard(ctx));
     return;
   }
   if (supplied !== AUTH_PASSWORD) {
-    await ctx.reply("Invalid password.");
+    await ctx.reply("Invalid password.", mainKeyboard(ctx));
     return;
   }
 
@@ -341,13 +419,13 @@ bot.command("auth", async (ctx) => {
     const added = await authenticateUser(userId);
     if (added) {
       log("info", "user_authenticated", { user_id: userId, total: authenticatedUsers.size });
-      await ctx.reply("Authentication successful.");
+      await ctx.reply("Authentication successful.", mainKeyboard(ctx));
       return;
     }
-    await ctx.reply("Already authenticated.");
+    await ctx.reply("Already authenticated.", mainKeyboard(ctx));
   } catch (err) {
     log("error", "auth_store_persist_failed", { message: err.message });
-    await ctx.reply("Authenticated for this run, but failed to persist auth store.");
+    await ctx.reply("Authenticated for this run, but failed to persist auth store.", mainKeyboard(ctx));
   }
 });
 
@@ -367,6 +445,40 @@ bot.command("health", async (ctx) => {
       `rate_limit: ${RATE_LIMIT_COUNT}/${RATE_LIMIT_WINDOW_MS}ms`,
     ].join("\n")
   );
+});
+
+bot.command("invalid", async (ctx) => {
+  if (!(await guard(ctx))) return;
+  const text = String(ctx?.message?.text || "");
+  const input = text.replace(/^\/invalid(@\w+)?\s*/i, "").trim().toLowerCase();
+
+  if (!input) {
+    const showInvalid = shouldShowInvalidBulkForCtx(ctx);
+    await ctx.reply(
+      `Invalid links in bulk output: ${showInvalid ? "ON" : "OFF"}\nUse: /invalid on or /invalid off`,
+      mainKeyboard(ctx)
+    );
+    return;
+  }
+
+  let nextValue;
+  if (["on", "show", "true", "yes", "1"].includes(input)) nextValue = true;
+  else if (["off", "hide", "false", "no", "0"].includes(input)) nextValue = false;
+  else {
+    await ctx.reply("Invalid value. Use: /invalid on or /invalid off", mainKeyboard(ctx));
+    return;
+  }
+
+  try {
+    await setShowInvalidBulk(ctx?.from?.id, nextValue);
+    await ctx.reply(
+      `Updated: invalid links in bulk output are now ${nextValue ? "ON" : "OFF"}.`,
+      mainKeyboard(ctx)
+    );
+  } catch (err) {
+    log("error", "user_prefs_store_persist_failed", { message: err.message });
+    await ctx.reply("Failed to save setting.", mainKeyboard(ctx));
+  }
 });
 
 bot.command("stats", async (ctx) => {
@@ -437,7 +549,7 @@ bot.on("text", async (ctx) => {
   await ctx.reply(`Checking ${links.length} links...`);
   try {
     const results = await checkBulk(links);
-    const lines = buildBulkLines(results);
+    const lines = buildBulkLines(results, { showInvalid: shouldShowInvalidBulkForCtx(ctx) });
     await replyInChunks(ctx, lines);
   } catch (err) {
     log("error", "bulk_failed", { message: err.message });
@@ -456,6 +568,7 @@ bot.catch((err, ctx) => {
 
 async function launch() {
   await loadAuthenticatedUsers();
+  await loadUserPrefs();
   if (WEBHOOK_DOMAIN) {
     await bot.launch({
       webhook: {

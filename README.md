@@ -8,6 +8,8 @@ Telegram bot for validating Telegram links using `https://telecheck.vercel.app`.
 - `/bulk` reply workflow for guided multi-link checks (optional)
 - optional password authentication via `/auth <password>`
 - persistent authenticated-user store and count in `/stats`
+- per-user bulk preference: show/hide invalid links via `/invalid on|off`
+- built-in Telegram keyboard buttons for common commands
 - full result output in safe chunks (no 30-row truncation)
 - valid links shown first, then invalid, then unknown
 - bulk fallback to per-link checks when bulk response shape changes
@@ -28,6 +30,7 @@ Telegram bot for validating Telegram links using `https://telecheck.vercel.app`.
 - `/auth <password>` (when `AUTH_PASSWORD` is configured)
 - `/check https://t.me/example`
 - `/bulk`
+- `/invalid on|off`
 - `/stats`
 - `/health` (admin only if `ADMIN_USER_IDS` is set)
 
@@ -35,6 +38,7 @@ Telegram bot for validating Telegram links using `https://telecheck.vercel.app`.
 Set in `.env`:
 - `AUTH_PASSWORD=<your-password>`
 - `AUTH_STORE_FILE=./data/auth-users.json`
+- `USER_PREFS_STORE_FILE=./data/user-settings.json`
 
 When enabled, users must authenticate once with `/auth <password>`. The bot stores authenticated Telegram user IDs in `AUTH_STORE_FILE` and `/stats` includes `Authenticated Users: <count>`.
 

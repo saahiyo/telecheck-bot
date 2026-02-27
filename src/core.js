@@ -78,17 +78,19 @@ function orderResults(results) {
   return [...results].sort((a, b) => (rank[a.status] ?? 99) - (rank[b.status] ?? 99));
 }
 
-function buildBulkLines(results) {
+function buildBulkLines(results, options = {}) {
+  const showInvalid = options.showInvalid !== false;
   const summary = {
     valid: results.filter((r) => r.status === "valid").length,
     invalid: results.filter((r) => r.status === "invalid").length,
     unknown: results.filter((r) => r.status === "unknown").length,
   };
-  const ordered = orderResults(results);
+  const ordered = orderResults(results).filter((r) => showInvalid || r.status !== "invalid");
+  const invalidSummary = showInvalid ? `Invalid: ${summary.invalid}` : `Invalid: ${summary.invalid} (hidden)`;
   return [
     `Done. Total: ${results.length}`,
     `Valid: ${summary.valid}`,
-    `Invalid: ${summary.invalid}`,
+    invalidSummary,
     `Unknown: ${summary.unknown}`,
     "",
     ...ordered.map((r) => {
