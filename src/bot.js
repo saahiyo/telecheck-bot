@@ -73,7 +73,7 @@ function isAuthenticated(ctx) {
 }
 
 function isAuthExemptMessage(text) {
-  return /^\/(start|help|auth)(@\w+)?(\s|$)/i.test(String(text || ""));
+  return /^(\/(start|help|auth)(@\w+)?(\s|$)|(start|help|auth)\s*$)/i.test(String(text || ""));
 }
 
 function getUserPref(userId) {
@@ -91,16 +91,7 @@ function shouldShowInvalidBulkForCtx(ctx) {
 
 function mainKeyboard(ctx) {
   const rows = [];
-  if (hasPasswordAuth() && !isAuthenticated(ctx)) {
-    rows.push(["/auth"]);
-    rows.push(["/help"]);
-    return Markup.keyboard(rows).resize();
-  }
-
-  rows.push(["/check", "/bulk"]);
-  rows.push(["/stats", "/invalid"]);
-  rows.push(["/help"]);
-  if (isAdmin(ctx)) rows.push(["/health"]);
+  rows.push(["check", "bulk check"]);
   return Markup.keyboard(rows).resize();
 }
 
@@ -524,9 +515,22 @@ bot.command("bulk", async (ctx) => {
 });
 
 bot.on("text", async (ctx) => {
-  if (!(await guard(ctx))) return;
   const text = (ctx.message.text || "").trim();
-  if (!text || text.startsWith("/")) return;
+  if (!(await guard(ctx))) return;
+  const normalizedText = text.toLowerCase();
+  if (!text) return;
+
+  if (normalizedText === "check") {
+    await ctx.reply("Send one link to check, or use: /check <link>");
+    return;
+  }
+
+  if (normalizedText === "bulk check") {
+    await ctx.reply(BULK_REPLY_PROMPT);
+    return;
+  }
+
+  if (text.startsWith("/")) return;
 
   const links = deduplicateLinks(extractUrls(text));
   if (links.length === 0) return;
