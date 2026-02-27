@@ -1,5 +1,7 @@
 require("dotenv").config();
 
+const { promises: fsp } = require("fs");
+const path = require("path");
 const axios = require("axios");
 const { Telegraf } = require("telegraf");
 const {
@@ -24,6 +26,8 @@ const RETRY_ATTEMPTS = Number(process.env.RETRY_ATTEMPTS || 3);
 const RETRY_BASE_DELAY_MS = Number(process.env.RETRY_BASE_DELAY_MS || 400);
 const RATE_LIMIT_COUNT = Number(process.env.RATE_LIMIT_COUNT || 20);
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60000);
+const AUTH_PASSWORD = String(process.env.AUTH_PASSWORD || "").trim();
+const AUTH_STORE_FILE = process.env.AUTH_STORE_FILE || "./data/auth-users.json";
 const ALLOWED_CHAT_IDS = parseIdList(process.env.ALLOWED_CHAT_IDS || "");
 const ADMIN_USER_IDS = parseIdList(process.env.ADMIN_USER_IDS || "");
 
@@ -41,6 +45,8 @@ const api = axios.create({
   timeout: REQUEST_TIMEOUT_MS,
 });
 const rateLimiter = new Map();
+const authenticatedUsers = new Set();
+const authStorePath = path.isAbsolute(AUTH_STORE_FILE) ? AUTH_STORE_FILE : path.resolve(process.cwd(), AUTH_STORE_FILE);
 
 function parseIdList(value) {
   return new Set(
@@ -51,6 +57,53 @@ function parseIdList(value) {
       .map((v) => Number(v))
       .filter(Number.isFinite)
   );
+}
+
+function hasPasswordAuth() {
+  return Boolean(AUTH_PASSWORD);
+}
+
+function isAuthenticated(ctx) {
+  if (!hasPasswordAuth()) return true;
+  const userId = Number(ctx?.from?.id);
+  return Number.isFinite(userId) && authenticatedUsers.has(userId);
+}
+
+function isAuthExemptMessage(text) {
+  return /^\/(start|help|auth)(@\w+)?(\s|$)/i.test(String(text || ""));
+}
+
+async function loadAuthenticatedUsers() {
+  try {
+    const raw = await fsp.readFile(authStorePath, "utf8");
+    const parsed = JSON.parse(raw);
+    const ids = Array.isArray(parsed?.user_ids) ? parsed.user_ids : [];
+    for (const id of ids.map((v) => Number(v)).filter(Number.isFinite)) {
+      authenticatedUsers.add(id);
+    }
+    log("info", "auth_store_loaded", { file: authStorePath, users: authenticatedUsers.size });
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      log("info", "auth_store_not_found", { file: authStorePath });
+      return;
+    }
+    log("error", "auth_store_load_failed", { file: authStorePath, message: err.message });
+  }
+}
+
+async function persistAuthenticatedUsers() {
+  const dir = path.dirname(authStorePath);
+  await fsp.mkdir(dir, { recursive: true });
+  const payload = { user_ids: [...authenticatedUsers].sort((a, b) => a - b) };
+  await fsp.writeFile(authStorePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+async function authenticateUser(userId) {
+  if (!Number.isFinite(userId)) return false;
+  if (authenticatedUsers.has(userId)) return false;
+  authenticatedUsers.add(userId);
+  await persistAuthenticatedUsers();
+  return true;
 }
 
 function nowIso() {
@@ -82,7 +135,8 @@ function isRetryableError(err) {
   return Boolean(err?.code === "ECONNRESET" || err?.code === "ECONNABORTED" || err?.code === "ETIMEDOUT");
 }
 
-async function withRetry(action, label) {
+async function withRetry(action, label, options = {}) {
+  const suppressStatuses = new Set(options.suppressStatuses || []);
   let lastErr;
   for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
     try {
@@ -91,14 +145,17 @@ async function withRetry(action, label) {
       lastErr = err;
       const retryable = isRetryableError(err);
       const canRetry = retryable && attempt < RETRY_ATTEMPTS;
-      log("error", "api_call_failed", {
-        label,
-        attempt,
-        retryable,
-        status: err?.response?.status,
-        code: err?.code,
-        message: err?.message,
-      });
+      const status = err?.response?.status;
+      if (!suppressStatuses.has(status)) {
+        log("error", "api_call_failed", {
+          label,
+          attempt,
+          retryable,
+          status,
+          code: err?.code,
+          message: err?.message,
+        });
+      }
       if (!canRetry) break;
       const delay = RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
       await sleep(delay);
@@ -164,12 +221,17 @@ async function checkBulk(links) {
     () => api.post("/", { links }),
     () => api.post("/", links),
     () => api.post("/", { data: links }),
+    () => api.post("/", { urls: links }),
   ];
 
   let lastErr;
+  let hadSuccessfulResponse = false;
   for (const payloadAttempt of attempts) {
     try {
-      const { data } = await withRetry(payloadAttempt, "bulk");
+      const { data } = await withRetry(payloadAttempt, "bulk", {
+        suppressStatuses: [400, 404, 405, 415, 422],
+      });
+      hadSuccessfulResponse = true;
       const rows = extractBulkRows(data, links);
       if (!rows) continue;
 
@@ -184,8 +246,10 @@ async function checkBulk(links) {
     }
   }
 
-  if (lastErr) {
+  if (lastErr && !hadSuccessfulResponse) {
     log("error", "bulk_fallback_to_single", { message: lastErr.message });
+  } else {
+    log("info", "bulk_fallback_to_single", { reason: "bulk_payload_or_response_not_supported" });
   }
   return checkBulkFallback(links);
 }
@@ -204,11 +268,15 @@ async function guard(ctx) {
     await ctx.reply("This chat is not allowed to use this bot.");
     return false;
   }
+  const text = String(ctx?.message?.text || "");
+  if (!isAuthenticated(ctx) && !isAuthExemptMessage(text)) {
+    await ctx.reply("Password required. Use /auth <password>.");
+    return false;
+  }
   if (!consumeRateLimit(ctx)) {
     await ctx.reply("Rate limit hit. Please wait a bit and try again.");
     return false;
   }
-  const text = String(ctx?.message?.text || "");
   if (text.length > MAX_MESSAGE_CHARS) {
     await ctx.reply(`Message too large. Max characters allowed: ${MAX_MESSAGE_CHARS}.`);
     return false;
@@ -225,6 +293,7 @@ bot.start(async (ctx) => {
       "Commands:",
       "/check &lt;link&gt; - check one link",
       "/bulk - request bulk mode prompt",
+      "/auth &lt;password&gt; - authenticate this account",
       "/stats - show API stats",
       "/health - runtime health",
       "/help - usage guide",
@@ -237,12 +306,49 @@ bot.help(async (ctx) => {
   return ctx.reply(
     [
       "Usage:",
+      "0) /auth <password> (if password auth is enabled)",
       "1) /check https://t.me/example",
       "2) /bulk then reply to prompt with many links",
       "3) /stats",
       `Limits: ${MAX_LINKS_PER_BULK} links per bulk request.`,
     ].join("\n")
   );
+});
+
+bot.command("auth", async (ctx) => {
+  if (!isAllowedChat(ctx)) {
+    await ctx.reply("This chat is not allowed to use this bot.");
+    return;
+  }
+  if (!hasPasswordAuth()) {
+    await ctx.reply("Password auth is not enabled.");
+    return;
+  }
+
+  const text = String(ctx?.message?.text || "");
+  const supplied = text.replace(/^\/auth(@\w+)?\s*/i, "").trim();
+  if (!supplied) {
+    await ctx.reply("Provide password. Example: /auth your_password");
+    return;
+  }
+  if (supplied !== AUTH_PASSWORD) {
+    await ctx.reply("Invalid password.");
+    return;
+  }
+
+  const userId = Number(ctx?.from?.id);
+  try {
+    const added = await authenticateUser(userId);
+    if (added) {
+      log("info", "user_authenticated", { user_id: userId, total: authenticatedUsers.size });
+      await ctx.reply("Authentication successful.");
+      return;
+    }
+    await ctx.reply("Already authenticated.");
+  } catch (err) {
+    log("error", "auth_store_persist_failed", { message: err.message });
+    await ctx.reply("Authenticated for this run, but failed to persist auth store.");
+  }
 });
 
 bot.command("health", async (ctx) => {
@@ -272,6 +378,7 @@ bot.command("stats", async (ctx) => {
     if (stats.valid !== undefined) lines.push(`Valid: ${stats.valid}`);
     if (stats.invalid !== undefined) lines.push(`Invalid: ${stats.invalid}`);
     if (stats.unknown !== undefined) lines.push(`Unknown: ${stats.unknown}`);
+    lines.push(`Authenticated Users: ${authenticatedUsers.size}`);
     if (lines.length === 1) lines.push(JSON.stringify(stats.raw));
     await ctx.reply(lines.join("\n"));
   } catch (err) {
@@ -309,16 +416,12 @@ bot.on("text", async (ctx) => {
   const text = (ctx.message.text || "").trim();
   if (!text || text.startsWith("/")) return;
 
-  const reply = ctx.message.reply_to_message;
-  const isBulkReply = Boolean(reply?.from?.is_bot) && typeof reply?.text === "string" && reply.text.includes(BULK_REPLY_PROMPT);
-
   const links = deduplicateLinks(extractUrls(text));
   if (links.length === 0) return;
   if (links.length > MAX_LINKS_PER_BULK) {
     await ctx.reply(`Too many links. Max allowed per bulk check: ${MAX_LINKS_PER_BULK}.`);
     return;
   }
-  if (links.length > 1 && !isBulkReply) return;
 
   if (links.length === 1) {
     try {
@@ -352,6 +455,7 @@ bot.catch((err, ctx) => {
 });
 
 async function launch() {
+  await loadAuthenticatedUsers();
   if (WEBHOOK_DOMAIN) {
     await bot.launch({
       webhook: {
