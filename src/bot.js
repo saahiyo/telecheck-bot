@@ -24,8 +24,6 @@ const MAX_LINKS_PER_BULK = Number(process.env.MAX_LINKS_PER_BULK || 300);
 const REPLY_CHUNK_MAX_LEN = Number(process.env.REPLY_CHUNK_MAX_LEN || 3500);
 const RETRY_ATTEMPTS = Number(process.env.RETRY_ATTEMPTS || 3);
 const RETRY_BASE_DELAY_MS = Number(process.env.RETRY_BASE_DELAY_MS || 400);
-const RATE_LIMIT_COUNT = Number(process.env.RATE_LIMIT_COUNT || 20);
-const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60000);
 const AUTH_PASSWORD = String(process.env.AUTH_PASSWORD || "").trim();
 const AUTH_STORE_FILE = process.env.AUTH_STORE_FILE || "./data/auth-users.json";
 const USER_PREFS_STORE_FILE = process.env.USER_PREFS_STORE_FILE || "./data/user-settings.json";
@@ -45,7 +43,7 @@ const api = axios.create({
   baseURL: API_BASE_URL,
   timeout: REQUEST_TIMEOUT_MS,
 });
-const rateLimiter = new Map();
+
 const authenticatedUsers = new Set();
 const authStorePath = path.isAbsolute(AUTH_STORE_FILE) ? AUTH_STORE_FILE : path.resolve(process.cwd(), AUTH_STORE_FILE);
 const userPrefs = new Map();
@@ -241,20 +239,7 @@ function isAdmin(ctx) {
   return ADMIN_USER_IDS.has(userId);
 }
 
-function consumeRateLimit(ctx) {
-  const userId = String(ctx?.from?.id || "unknown");
-  const now = Date.now();
-  const windowStart = now - RATE_LIMIT_WINDOW_MS;
-  const arr = rateLimiter.get(userId) || [];
-  const inWindow = arr.filter((t) => t >= windowStart);
-  if (inWindow.length >= RATE_LIMIT_COUNT) {
-    rateLimiter.set(userId, inWindow);
-    return false;
-  }
-  inWindow.push(now);
-  rateLimiter.set(userId, inWindow);
-  return true;
-}
+// Rate limiting removed — all requests allowed.
 
 function formatOne(result) {
   const icon = result.status === "valid" ? "[VALID]" : result.status === "invalid" ? "[INVALID]" : "[UNKNOWN]";
@@ -336,10 +321,6 @@ async function guard(ctx) {
   const text = String(ctx?.message?.text || "");
   if (!isAuthenticated(ctx) && !isAuthExemptMessage(text)) {
     await ctx.reply("Password required. Use /auth <password>.", mainKeyboard(ctx));
-    return false;
-  }
-  if (!consumeRateLimit(ctx)) {
-    await ctx.reply("Rate limit hit. Please wait a bit and try again.");
     return false;
   }
   if (text.length > MAX_MESSAGE_CHARS) {
@@ -433,7 +414,7 @@ bot.command("health", async (ctx) => {
       `uptime_sec: ${uptimeSec}`,
       `mode: ${WEBHOOK_DOMAIN ? "webhook" : "polling"}`,
       `api_base: ${API_BASE_URL}`,
-      `rate_limit: ${RATE_LIMIT_COUNT}/${RATE_LIMIT_WINDOW_MS}ms`,
+      `rate_limit: none`,
     ].join("\n")
   );
 });
