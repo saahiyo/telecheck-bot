@@ -24,6 +24,8 @@ const MAX_LINKS_PER_BULK = Number(process.env.MAX_LINKS_PER_BULK || 300);
 const REPLY_CHUNK_MAX_LEN = Number(process.env.REPLY_CHUNK_MAX_LEN || 3500);
 const RETRY_ATTEMPTS = Number(process.env.RETRY_ATTEMPTS || 3);
 const RETRY_BASE_DELAY_MS = Number(process.env.RETRY_BASE_DELAY_MS || 400);
+const PROCESSED_DELETE_MS = Number(process.env.PROCESSED_DELETE_MS || 5 * 60 * 1000);
+const PROCESSED_WARNING_TEXT = 'Save these messages it will get automatically get deleted after 5 minutes.';
 const AUTH_PASSWORD = String(process.env.AUTH_PASSWORD || "").trim();
 const AUTH_STORE_FILE = process.env.AUTH_STORE_FILE || "./data/auth-users.json";
 const USER_PREFS_STORE_FILE = process.env.USER_PREFS_STORE_FILE || "./data/user-settings.json";
@@ -246,11 +248,26 @@ function formatOne(result) {
   return `${icon} <b>${escapeHtml(result.status.toUpperCase())}</b>\nLINK: <code>${escapeHtml(result.link)}</code>`;
 }
 
+function scheduleDelete(telegram, chatId, messageId) {
+  if (!messageId) return;
+  if (!PROCESSED_DELETE_MS || PROCESSED_DELETE_MS <= 0) return;
+  setTimeout(() => {
+    telegram.deleteMessage(chatId, messageId).catch(() => {});
+  }, PROCESSED_DELETE_MS);
+}
+
+async function sendProcessedWarning(ctx) {
+  await ctx.reply(PROCESSED_WARNING_TEXT);
+}
+
 async function replyInChunks(ctx, lines) {
   const chunks = chunkLines(lines, REPLY_CHUNK_MAX_LEN);
+  const messageIds = [];
   for (const chunk of chunks) {
-    await ctx.reply(chunk);
+    const msg = await ctx.reply(chunk);
+    if (msg?.message_id) messageIds.push(msg.message_id);
   }
+  return messageIds;
 }
 
 async function checkSingle(link) {
@@ -483,7 +500,9 @@ bot.command("check", async (ctx) => {
 
   try {
     const result = await checkSingle(link);
-    await ctx.replyWithHTML(formatOne(result));
+    const msg = await ctx.replyWithHTML(formatOne(result));
+    await sendProcessedWarning(ctx);
+    if (msg?.message_id) scheduleDelete(ctx.telegram, ctx.chat.id, msg.message_id);
   } catch (err) {
     log("error", "single_failed", { message: err.message });
     await ctx.reply("Check failed.");
@@ -523,7 +542,9 @@ bot.on("text", async (ctx) => {
   if (links.length === 1) {
     try {
       const result = await checkSingle(links[0]);
-      await ctx.replyWithHTML(formatOne(result));
+      const msg = await ctx.replyWithHTML(formatOne(result));
+      await sendProcessedWarning(ctx);
+      if (msg?.message_id) scheduleDelete(ctx.telegram, ctx.chat.id, msg.message_id);
     } catch (err) {
       log("error", "single_text_failed", { message: err.message });
       await ctx.reply("Check failed.");
@@ -535,7 +556,9 @@ bot.on("text", async (ctx) => {
   try {
     const results = await checkBulk(links);
     const lines = buildBulkLines(results, { showInvalid: shouldShowInvalidBulkForCtx(ctx) });
-    await replyInChunks(ctx, lines);
+    const messageIds = await replyInChunks(ctx, lines);
+    await sendProcessedWarning(ctx);
+    for (const id of messageIds) scheduleDelete(ctx.telegram, ctx.chat.id, id);
   } catch (err) {
     log("error", "bulk_failed", { message: err.message });
     await ctx.reply("Bulk check failed.");
@@ -584,3 +607,4 @@ launch().catch((err) => {
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
+
