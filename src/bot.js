@@ -291,6 +291,14 @@ function formatOne(result) {
   return `${icon} <b>${escapeHtml(result.status.toUpperCase())}</b>\n🔗 LINK: <code>${escapeHtml(result.link)}</code>`;
 }
 
+function scheduleDelete(telegram, chatId, messageId) {
+  if (!messageId) return;
+  if (!PROCESSED_DELETE_MS || PROCESSED_DELETE_MS <= 0) return;
+  setTimeout(() => {
+    telegram.deleteMessage(chatId, messageId).catch(() => {});
+  }, PROCESSED_DELETE_MS);
+}
+
 async function cleanupOriginalMessage(ctx) {
   if (ctx?.message?.message_id && ctx?.chat?.id) {
     scheduleDelete(ctx.telegram, ctx.chat.id, ctx.message.message_id);
