@@ -78,26 +78,53 @@ function orderResults(results) {
   return [...results].sort((a, b) => (rank[a.status] ?? 99) - (rank[b.status] ?? 99));
 }
 
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function buildBulkLines(results, options = {}) {
   const showInvalid = options.showInvalid !== false;
-  const summary = {
-    valid: results.filter((r) => r.status === "valid").length,
-    invalid: results.filter((r) => r.status === "invalid").length,
-    unknown: results.filter((r) => r.status === "unknown").length,
-  };
-  const ordered = orderResults(results).filter((r) => showInvalid || r.status !== "invalid");
-  const invalidSummary = showInvalid ? `Invalid: ${summary.invalid}` : `Invalid: ${summary.invalid} (hidden)`;
-  return [
-    `Done. Total: ${results.length}`,
-    `Valid: ${summary.valid}`,
-    invalidSummary,
-    `Unknown: ${summary.unknown}`,
+  const validLinks = results.filter((r) => r.status === "valid");
+  const invalidLinks = results.filter((r) => r.status === "invalid");
+  const unknownLinks = results.filter((r) => r.status === "unknown");
+
+  const lines = [
+    `📊 <b>Done. Total: ${results.length}</b>`,
+    `✅ ${validLinks.length}  ❌ ${invalidLinks.length}  ❓ ${unknownLinks.length}`,
     "",
-    ...ordered.map((r) => {
-      const icon = r.status === "valid" ? "[V]" : r.status === "invalid" ? "[X]" : "[?]";
-      return `${icon} ${r.link}`;
-    }),
   ];
+
+  if (validLinks.length > 0) {
+    lines.push(`<b>✅ Valid Links</b>`);
+    lines.push(`─────────────────`);
+    validLinks.forEach((r, i) => {
+      lines.push(`${i + 1}. ${escapeHtml(r.link)}`);
+    });
+    lines.push("");
+  }
+
+  if (showInvalid && invalidLinks.length > 0) {
+    lines.push(`<b>❌ Invalid Links</b>`);
+    lines.push(`─────────────────`);
+    invalidLinks.forEach((r, i) => {
+      lines.push(`${i + 1}. ${escapeHtml(r.link)}`);
+    });
+    lines.push("");
+  }
+
+  if (unknownLinks.length > 0) {
+    lines.push(`<b>❓ Unknown Links</b>`);
+    lines.push(`─────────────────`);
+    unknownLinks.forEach((r, i) => {
+      lines.push(`${i + 1}. ${escapeHtml(r.link)}`);
+    });
+    lines.push("");
+  }
+
+  return lines;
 }
 
 function chunkLines(lines, maxLen = 3500) {
