@@ -8,10 +8,13 @@ Telegram bot for validating Telegram links using `https://telecheck.vercel.app`.
 - `/bulk` reply workflow for guided multi-link checks (optional)
 - optional password authentication via `/auth <password>`
 - persistent authenticated-user store and count in `/stats`
-- per-user bulk preference: show/hide invalid links via `/invalid on|off`
+- per-user bulk preference: hide/show invalid links via `/invalid on|off`
 - built-in Telegram keyboard buttons for common commands
-- full result output in safe chunks (no 30-row truncation)
-- valid links shown first, then invalid, then unknown
+- full HTML-formatted result output in safe chunks
+- smart auto-cleanup (auto-deletes original messages and responses after 5 minutes)
+- global bot-level statistics tracking (`totalProcessed`, `totalValid`, etc.)
+- typing action indicators and dynamic processing messages
+- grouped bulk check output with numbered valid/invalid/unknown lists
 - bulk fallback to per-link checks when bulk response shape changes
 - retries with backoff for transient API failures
 - per-user rate limiting and input-size limits
