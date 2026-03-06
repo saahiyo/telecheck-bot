@@ -92,13 +92,13 @@ function buildBulkLines(results, options = {}) {
   const unknownLinks = results.filter((r) => r.status === "unknown");
 
   const lines = [
-    `📊 <b>Done. Total: ${results.length}</b>`,
-    `✅ ${validLinks.length}  ❌ ${invalidLinks.length}  ❓ ${unknownLinks.length}`,
+    `<b>Done. Total: ${results.length}</b>`,
+    `Valid: ${validLinks.length}  Invalid: ${invalidLinks.length}  Unknown: ${unknownLinks.length}`,
     "",
   ];
 
   if (validLinks.length > 0) {
-    lines.push(`<b>✅ Valid Links</b>`);
+    lines.push(`<b>Valid Links</b>`);
     lines.push(`─────────────────`);
     validLinks.forEach((r, i) => {
       lines.push(`${i + 1}. ${escapeHtml(r.link)}`);
@@ -107,7 +107,7 @@ function buildBulkLines(results, options = {}) {
   }
 
   if (showInvalid && invalidLinks.length > 0) {
-    lines.push(`<b>❌ Invalid Links</b>`);
+    lines.push(`<b>Invalid Links</b>`);
     lines.push(`─────────────────`);
     invalidLinks.forEach((r, i) => {
       lines.push(`${i + 1}. ${escapeHtml(r.link)}`);
@@ -116,7 +116,7 @@ function buildBulkLines(results, options = {}) {
   }
 
   if (unknownLinks.length > 0) {
-    lines.push(`<b>❓ Unknown Links</b>`);
+    lines.push(`<b>Unknown Links</b>`);
     lines.push(`─────────────────`);
     unknownLinks.forEach((r, i) => {
       lines.push(`${i + 1}. ${escapeHtml(r.link)}`);

@@ -583,6 +583,15 @@ bot.on("text", async (ctx) => {
     return;
   }
 
+  if (text.startsWith("/")) return;
+
+  const links = deduplicateLinks(extractUrls(text));
+  if (links.length === 0) return;
+  if (links.length > MAX_LINKS_PER_BULK) {
+    await ctx.replyWithHTML(`⚠️ <b>Too many links.</b> Max allowed per bulk check: ${MAX_LINKS_PER_BULK}.`);
+    return;
+  }
+
   await cleanupOriginalMessage(ctx);
 
   if (links.length === 1) {
